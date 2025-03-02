@@ -14,9 +14,9 @@ def main():
         channel = 'COM5'  # Replace with your COM port (check in Device Manager)
         bitrate = 1000000  # Bitrate (1 Mbps)
     elif system == "Linux":
-        # Configuration for Linux
-        can_interface = 'socketcan'  # Use 'socketcan' for Canable devices on Linux
-        channel = 'can0'  # Replace with the CAN device name (e.g., can0, can1, etc.)
+        # Configuration for Linux      
+        can_interface = 'slcan'  # Use 'socketcan' for Canable devices on Linux
+        channel =  '/dev/ttyACM0'  # Replace with the CAN device name (e.g., can0, can1, etc.)
         bitrate = None  # On Linux, the bitrate is configured outside the script (e.g., with `ip link set can0 up type can bitrate 1000000`)
     else:
         print(f"Unsupported operating system: {system}")
