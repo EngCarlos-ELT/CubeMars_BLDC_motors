@@ -176,8 +176,8 @@ def detect_can_interface():
     elif system == 'Linux':
         # For Linux, use socketcan interface
         print("Detected Linux OS")
-        interface = 'socketcan'
-        channel = 'can0'  # Default CAN interface
+        interface = 'slcan'
+        channel = '/dev/ttyACM0'  # Default CAN interface
         print("Make sure CAN interface is up: sudo ip link set can0 up type can bitrate 1000000")
     else:
         # Default fallback
