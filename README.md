@@ -1,4 +1,4 @@
-IMPORTANT! To run this code, the following dependencies are necessary:
+IMPORTANT! To run these codes, the following dependencies are necessary:
 
 pip install python-can
 
