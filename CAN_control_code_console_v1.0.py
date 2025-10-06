@@ -1,24 +1,26 @@
+# -*- coding: utf-8 -*-
+# CubeMars AK80-64 - CAN Control (MIT / SERVO Modes)
+# Requirements:
+# pip install python-can
+
 import can
 import struct
 import time
 import platform
-import os
-from enum import Enum
 
-# Constants for AK80-64 motor
-P_MIN = -12.5
-P_MAX = 12.5
-V_MIN = -8.0
-V_MAX = 8.0
-KP_MIN = 0.0
-KP_MAX = 500.0
-KD_MIN = 0.0
-KD_MAX = 5.0
-T_MIN = -144.0
-T_MAX = 144.0
+# --- AK80-64 motor constants ---
+P_MIN, P_MAX = -12.5, 12.5
+V_MIN, V_MAX = -8.0, 8.0
+KP_MIN, KP_MAX = 0.0, 500.0
+KD_MIN, KD_MAX = 0.0, 5.0
+T_MIN, T_MAX = -144.0, 144.0
 
-CONTROLLER_ID = 0x17  # 23 in decimal
+# --- Automatic CAN IDs per mode ---
+MIT_ID = 1        # Default for MIT firmware
+SERVO_ID = 104    # Default for Servo firmware
 
+
+# --- Motor state container ---
 class MotorState:
     def __init__(self):
         self.p_in = 0.0
@@ -26,70 +28,61 @@ class MotorState:
         self.kp_in = 0.0
         self.kd_in = 0.50
         self.t_in = 0.0
-
-        # Measured values
         self.p_out = 0.0
         self.v_out = 0.0
         self.t_out = 0.0
 
+
+# --- Helper functions ---
 def float_to_uint(x, x_min, x_max, bits):
     span = x_max - x_min
-    offset = x_min
-    if bits == 12:
-        return int((x - offset) * 4095.0 / span)
-    elif bits == 16:
-        return int((x - offset) * 65535.0 / span)
-    return 0
+    return int((x - x_min) * ((1 << bits) - 1) / span)
+
 
 def uint_to_float(x_int, x_min, x_max, bits):
     span = x_max - x_min
-    offset = x_min
-    if bits == 12:
-        return (float(x_int) * span / 4095.0) + offset
-    elif bits == 16:
-        return (float(x_int) * span / 65535.0) + offset
-    return 0.0
+    return (float(x_int) * span / ((1 << bits) - 1)) + x_min
 
-def enter_mode(bus):
-    msg = can.Message(
-        arbitration_id=CONTROLLER_ID,
-        data=[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC],
-        is_extended_id=False
-    )
+
+# --- MIT Mode control functions ---
+def mit_enter_mode(bus, motor_id):
+    msg = can.Message(arbitration_id=motor_id, data=[0xFF]*7 + [0xFC], is_extended_id=False)
     bus.send(msg)
+    print(f"→ [MIT] Entering MIT mode (ID={motor_id})")
+    time.sleep(0.1)
 
-def exit_mode(bus):
-    msg = can.Message(
-        arbitration_id=CONTROLLER_ID,
-        data=[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD],
-        is_extended_id=False
-    )
+
+def mit_exit_mode(bus, motor_id):
+    msg = can.Message(arbitration_id=motor_id, data=[0xFF]*7 + [0xFD], is_extended_id=False)
     bus.send(msg)
+    print(f"→ [MIT] Exiting MIT mode (ID={motor_id})")
+    time.sleep(0.1)
 
-def zero_position(bus):
-    msg = can.Message(
-        arbitration_id=CONTROLLER_ID,
-        data=[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE],
-        is_extended_id=False
-    )
+
+def mit_zero_position(bus, motor_id):
+    msg = can.Message(arbitration_id=motor_id, data=[0xFF]*7 + [0xFE], is_extended_id=False)
     bus.send(msg)
+    print(f"→ [MIT] Zeroing position (ID={motor_id})")
+    time.sleep(0.1)
 
-def pack_cmd(bus, motor_state):
-    # Constrain values
+
+def mit_pack_cmd(bus, motor_state, motor_id):
+    """Pack and send a command in MIT format"""
+    # Clamp input values
     p_des = max(min(motor_state.p_in, P_MAX), P_MIN)
     v_des = max(min(motor_state.v_in, V_MAX), V_MIN)
     kp = max(min(motor_state.kp_in, KP_MAX), KP_MIN)
     kd = max(min(motor_state.kd_in, KD_MAX), KD_MIN)
     t_ff = max(min(motor_state.t_in, T_MAX), T_MIN)
 
-    # Convert to integers
+    # Convert floats to integers
     p_int = float_to_uint(p_des, P_MIN, P_MAX, 16)
     v_int = float_to_uint(v_des, V_MIN, V_MAX, 12)
     kp_int = float_to_uint(kp, KP_MIN, KP_MAX, 12)
     kd_int = float_to_uint(kd, KD_MIN, KD_MAX, 12)
     t_int = float_to_uint(t_ff, T_MIN, T_MAX, 12)
 
-    # Pack into buffer
+    # Pack into 8 bytes
     buf = bytearray(8)
     buf[0] = p_int >> 8
     buf[1] = p_int & 0xFF
@@ -100,84 +93,74 @@ def pack_cmd(bus, motor_state):
     buf[6] = ((kd_int & 0xF) << 4) | (t_int >> 8)
     buf[7] = t_int & 0xFF
 
-    msg = can.Message(
-        arbitration_id=CONTROLLER_ID,
-        data=buf,
-        is_extended_id=False
-    )
+    msg = can.Message(arbitration_id=motor_id, data=buf, is_extended_id=False)
     bus.send(msg)
+    print(f"→ [MIT] P={p_des:.2f} rad, KP={kp:.1f}, KD={kd:.2f}, T={t_ff:.2f}")
 
-def unpack_reply(msg, motor_state):
-    if msg is None:
-        return
 
-    buf = msg.data
-    id_received = buf[0]
-    p_int = (buf[1] << 8) | buf[2]
-    v_int = (buf[3] << 4) | (buf[4] >> 4)
-    i_int = ((buf[4] & 0xF) << 8) | buf[5]
+# --- SERVO Mode function ---
+def servo_send_command(bus, pos_deg, speed_erpm, accel_erpm_s2, motor_id):
+    """Send a position-velocity command using the Servo mode"""
+    POS_SPEED_LOOP_MODE = 6
+    can_id = (POS_SPEED_LOOP_MODE << 8) | motor_id  # Extended ID format
 
-    motor_state.p_out = uint_to_float(p_int, P_MIN, P_MAX, 16)
-    motor_state.v_out = uint_to_float(v_int, V_MIN, V_MAX, 12)
-    motor_state.t_out = uint_to_float(i_int, -T_MAX, T_MAX, 12)
+    pos_val = int(pos_deg * 10000)
+    speed_val = int(speed_erpm / 10)
+    accel_val = int(accel_erpm_s2 / 10)
 
+    data = struct.pack('>ihh', pos_val, speed_val, accel_val)
+    msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=True)
+    bus.send(msg)
+    print(f"→ [SERVO] Pos={pos_deg:.1f}°, Vel={speed_erpm} eRPM, Accel={accel_erpm_s2} eRPM/s²")
+
+
+# --- CAN interface detection ---
+def detect_can_interface():
+    system = platform.system()
+    if system == 'Windows':
+        interface = 'slcan'
+        channel = 'COM9'
+    elif system == 'Linux':
+        interface = 'slcan'
+        channel = '/dev/ttyACM0'
+        print("Ensure CAN interface is up: sudo ip link set can0 up type can bitrate 1000000")
+    else:
+        interface = 'slcan'
+        channel = 'COM9'
+    return interface, channel
+
+
+# --- Menu and user input ---
 def print_menu():
-    print("\n=== CubeMars AK80-64 Control Menu ===")
-    print("1. Enter MIT Mode")
-    print("2. Exit MIT Mode")
-    print("3. Send Control Command")
-    print("4. Read Status")
-    print("5. Zero Position")
+    print("\n=== CubeMars AK80-64 Control ===")
+    print("1. MIT Mode - Enter")
+    print("2. MIT Mode - Send Command")
+    print("3. MIT Mode - Exit")
+    print("4. SERVO Mode - Test 90° and Return")
     print("q. Quit")
-    print("Please enter your choice (1-5 or q):")
+    print("Select an option: ", end='')
+
 
 def get_float_input(prompt, min_val, max_val):
     while True:
         try:
-            value = float(input(f"Enter {prompt} ({min_val} to {max_val}): "))
-            if min_val <= value <= max_val:
-                return value
-            print(f"Value must be between {min_val} and {max_val}")
+            val = float(input(f"{prompt} ({min_val} to {max_val}): "))
+            if min_val <= val <= max_val:
+                return val
+            print("Value out of range.")
         except ValueError:
-            print("Please enter a valid number")
+            print("Invalid input. Please enter a number.")
 
-def detect_can_interface():
-    """Detect the appropriate CAN interface based on the operating system"""
-    system = platform.system()
 
-    if system == 'Windows':
-        # For Windows, use SLCAN interface with a COM port
-        print("Detected Windows OS")
-        interface = 'slcan'
-        channel = 'COM5'  # Default COM port
-
-    elif system == 'Linux':
-        # For Linux, use socketcan interface
-        print("Detected Linux OS")
-        interface = 'slcan'
-        channel = '/dev/ttyACM0'  # Default CAN interface
-        print("Make sure CAN interface is up: sudo ip link set can0 up type can bitrate 1000000")
-    else:
-        # Default fallback
-        print(f"Unsupported OS: {system}, using default configuration")
-        interface = 'slcan'
-        channel = 'COM5'
-
-    return interface, channel
-
+# --- Main program ---
 def main():
-    # Auto-detect CAN interface based on OS
     can_interface, channel = detect_can_interface()
     bitrate = 1000000
-
-    print(f"Using CAN interface: {can_interface}, channel: {channel}, bitrate: {bitrate}")
-
     motor_state = MotorState()
 
     try:
-        # Initialize CAN bus
         bus = can.interface.Bus(channel=channel, interface=can_interface, bitrate=bitrate)
-        print("CAN bus initialized successfully!")
+        print(f"✅ Connected to CAN interface {can_interface} ({channel})")
 
         while True:
             print_menu()
@@ -186,56 +169,48 @@ def main():
             if choice == 'q':
                 break
 
+            # --- MIT Mode ---
             elif choice == '1':
-                print("Entering MIT Mode...")
-                enter_mode(bus)
+                mit_enter_mode(bus, MIT_ID)
 
             elif choice == '2':
-                print("Exiting MIT Mode...")
-                exit_mode(bus)
+                print("\nEnter MIT Control Parameters:")
+                motor_state.p_in = get_float_input("Position (rad)", P_MIN, P_MAX)
+                motor_state.v_in = get_float_input("Velocity (rad/s)", V_MIN, V_MAX)
+                motor_state.kp_in = get_float_input("Kp", KP_MIN, KP_MAX)
+                motor_state.kd_in = get_float_input("Kd", KD_MIN, KD_MAX)
+                motor_state.t_in = get_float_input("Torque (Nm)", T_MIN, T_MAX)
+                mit_pack_cmd(bus, motor_state, MIT_ID)
 
             elif choice == '3':
-                print("\nEntering Control Command Parameters:")
-                motor_state.p_in = get_float_input("position", P_MIN, P_MAX)
-                motor_state.v_in = get_float_input("velocity", V_MIN, V_MAX)
-                motor_state.kp_in = get_float_input("kp", KP_MIN, KP_MAX)
-                motor_state.kd_in = get_float_input("kd", KD_MIN, KD_MAX)
-                motor_state.t_in = get_float_input("torque", T_MIN, T_MAX)
+                mit_exit_mode(bus, MIT_ID)
 
-                print("Sending command...")
-                pack_cmd(bus, motor_state)
-
+            # --- SERVO Mode ---
             elif choice == '4':
-                print("Reading status...")
-                msg = bus.recv(timeout=0.1)
-                if msg:
-                    unpack_reply(msg, motor_state)
-                    print("\nMotor Status:")
-                    print(f"Position: {motor_state.p_out:.2f}")
-                    print(f"Velocity: {motor_state.v_out:.2f}")
-                    print(f"Torque: {motor_state.t_out:.2f}")
-                else:
-                    print("No response received from motor")
-
-            elif choice == '5':
-                print("Zeroing position...")
-                zero_position(bus)
+                print("→ Running SERVO mode test (ID=104)")
+                target_speed = 5000
+                target_accel = 10000
+                servo_send_command(bus, 90.0, target_speed, target_accel, SERVO_ID)
+                time.sleep(3)
+                servo_send_command(bus, 0.0, target_speed, target_accel, SERVO_ID)
+                time.sleep(3)
+                print("✅ SERVO mode test complete.")
 
             else:
-                print("Invalid choice! Please select 1-5 or q")
+                print("Invalid option.")
 
             time.sleep(0.1)
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
     finally:
         try:
+            mit_exit_mode(bus, MIT_ID)
             bus.shutdown()
         except:
             pass
+        print("🛑 CAN interface closed.")
+
 
 if __name__ == "__main__":
     main()
-
-# Created/Modified files during execution:
-# No files are created or modified during execution
